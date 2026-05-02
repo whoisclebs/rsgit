@@ -1,0 +1,10 @@
+target/
+.git/
+.tmp/
+.env
+**/.env
+**/*secret*
+**/*credential*
+**/id_rsa*
+**/id_ed25519*
+Dockerfile

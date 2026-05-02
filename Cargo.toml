@@ -1,0 +1,8 @@
+[package]
+name = "rsgit"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny dependency-free Git web browser"
+license = "GPL-2.0-only OR MIT"
+
+[dependencies]

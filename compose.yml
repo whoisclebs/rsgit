@@ -1,0 +1,27 @@
+services:
+  rsgit:
+    image: ghcr.io/whoisclebs/rsgit:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      RSGIT_ADDR: 0.0.0.0:8080
+      RSGIT_REPO_ROOT: /repos
+      # Set this when publishing behind a reverse proxy/domain.
+      # RSGIT_PUBLIC_BASE: https://git.example.com
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /srv/public-git:/repos:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 64
+    user: "10001:65534"
