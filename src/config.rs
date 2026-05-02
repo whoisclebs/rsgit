@@ -3,7 +3,6 @@
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::error::{Error, Result};
 
@@ -15,9 +14,6 @@ pub struct Config {
     addr: SocketAddr,
     repo_root: PathBuf,
     public_base: Option<String>,
-    git_bin: String,
-    git_timeout: Duration,
-    max_git_output_bytes: usize,
     max_clone_file_bytes: u64,
 }
 
@@ -38,9 +34,6 @@ impl Config {
             public_base: env::var("RSGIT_PUBLIC_BASE")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            git_bin: env::var("RSGIT_GIT").unwrap_or_else(|_| "git".to_string()),
-            git_timeout: Duration::from_secs(5),
-            max_git_output_bytes: 2 * 1024 * 1024,
             max_clone_file_bytes: 128 * 1024 * 1024,
         })
     }
@@ -56,18 +49,6 @@ impl Config {
     /// Optional public URL base used for clone commands behind reverse proxies.
     pub fn public_base(&self) -> Option<&str> {
         self.public_base.as_deref()
-    }
-    /// Git executable name or absolute path.
-    pub fn git_bin(&self) -> &str {
-        &self.git_bin
-    }
-    /// Maximum runtime for a Git subprocess.
-    pub fn git_timeout(&self) -> Duration {
-        self.git_timeout
-    }
-    /// Maximum captured stdout bytes for UI Git commands.
-    pub fn max_git_output_bytes(&self) -> usize {
-        self.max_git_output_bytes
     }
     /// Maximum object/pack file bytes served for clone endpoints.
     pub fn max_clone_file_bytes(&self) -> u64 {

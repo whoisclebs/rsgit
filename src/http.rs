@@ -28,10 +28,6 @@ impl Request {
     pub fn host(&self) -> Option<&str> {
         self.host.as_deref()
     }
-    /// True when a query key exists.
-    pub fn has_query(&self, key: &str) -> bool {
-        self.query.contains_key(key)
-    }
 }
 
 /// Parse a small HTTP/1.x request. The server closes every connection and only

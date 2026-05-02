@@ -7,35 +7,30 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::git::Git;
+use crate::git;
 use crate::html;
 use crate::http::{self, Request};
 use crate::repo::{self, Repo};
-use crate::security::{
-    safe_clone_file_path, safe_git_path, safe_git_rev, safe_host, safe_http_clone_url,
-};
+use crate::security::{safe_clone_file_path, safe_host, safe_http_clone_url};
 
 const MAX_REQUEST_BYTES: usize = 8192;
 const MAX_SEARCH_QUERY_LEN: usize = 128;
 
-/// The rsgit application state.
+/// rsgit application state.
 pub struct App {
     config: Config,
-    git: Git,
 }
 
 impl App {
     /// Create an application with immutable configuration.
     pub fn new(config: Config) -> Self {
-        let git = Git::new(&config);
-        Self { config, git }
+        Self { config }
     }
 
     /// Serve one TCP connection.
     pub fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-
         let mut buf = [0_u8; MAX_REQUEST_BYTES];
         let n = stream.read(&mut buf)?;
         if n == 0 {
@@ -98,7 +93,7 @@ impl App {
         let clone_path = parts[2..].join("/");
         match clone_path.as_str() {
             "HEAD" => Some(self.serve_git_head(&repo)),
-            "info/refs" => Some(self.serve_info_refs(&repo, req)),
+            "info/refs" => Some(self.serve_info_refs(&repo)),
             "objects/info/packs" => Some(self.serve_info_packs(&repo)),
             _ if clone_path.starts_with("objects/") => {
                 Some(self.serve_git_file(&repo, &clone_path))
@@ -113,21 +108,21 @@ impl App {
             return self.render_index(req);
         }
         if parts[0] != "repo" {
-            return response_html(
+            return html_response(
                 404,
                 "Not Found",
                 html::page("not found", "<h1>not found</h1>"),
             );
         }
         let Some(repo_name) = parts.get(1) else {
-            return response_html(
+            return html_response(
                 400,
                 "Bad Request",
                 html::page("missing repository", "<h1>missing repository</h1>"),
             );
         };
         let Some(repo) = repo::find(&self.config, repo_name) else {
-            return response_html(
+            return html_response(
                 404,
                 "Not Found",
                 html::page("repository not found", "<h1>repository not found</h1>"),
@@ -136,12 +131,28 @@ impl App {
         match parts.get(2).copied().unwrap_or("summary") {
             "summary" => self.render_summary(&repo, req),
             "log" => self.render_log(&repo),
-            "tree" => self.render_tree(&repo, req),
-            "blob" => self.render_blob(&repo, req),
-            "commit" => self.render_commit(&repo, req),
-            "diff" => self.render_diff(&repo, req),
+            "tree" => self.not_implemented(
+                &repo,
+                "tree",
+                "Native tree parsing requires object decompression support.",
+            ),
+            "blob" => self.not_implemented(
+                &repo,
+                "blob",
+                "Native blob parsing requires object decompression support.",
+            ),
+            "commit" => self.not_implemented(
+                &repo,
+                "commit",
+                "Native commit parsing requires object decompression support.",
+            ),
+            "diff" => self.not_implemented(
+                &repo,
+                "diff",
+                "Native diff parsing requires object decompression support.",
+            ),
             "search" => self.render_search(&repo, req),
-            _ => response_html(
+            _ => html_response(
                 404,
                 "Not Found",
                 html::page("not found", "<h1>not found</h1>"),
@@ -154,322 +165,107 @@ impl App {
         repos.sort_by(|a, b| a.name().cmp(b.name()));
         let q_raw = req.query("q").unwrap_or("").trim();
         let q = q_raw.to_ascii_lowercase();
-
-        let mut body = String::from("<h1>rsgit</h1><p>A tiny Git browser.</p><form class=\"index-search\" method=\"get\" action=\"/\"><input name=\"q\" type=\"search\" placeholder=\"search repositories\" value=\"");
-        body.push_str(&html::attr(q_raw));
-        body.push_str("\"><button>Search</button></form><table><tr><th>Repository</th><th>Description</th></tr>");
+        let mut body = format!("<h1>rsgit</h1><p>A tiny Git browser.</p><form class=\"index-search\" method=\"get\" action=\"/\"><input name=\"q\" type=\"search\" placeholder=\"search repositories\" value=\"{}\"><button>Search</button></form><table><tr><th>Repository</th><th>Description</th></tr>", html::attr(q_raw));
         for repo in repos {
-            let desc = self.git.output(&repo, &["description"]).unwrap_or_default();
-            let desc_line = desc.lines().next().unwrap_or("").trim();
+            let desc = git::description(&repo);
             if !q.is_empty()
                 && !repo.name().to_ascii_lowercase().contains(&q)
-                && !desc_line.to_ascii_lowercase().contains(&q)
+                && !desc.to_ascii_lowercase().contains(&q)
             {
                 continue;
             }
-            body.push_str("<tr><td><a href=\"");
-            body.push_str(&html::attr(&format!(
-                "/repo/{}/summary",
-                html::url_path(repo.name())
-            )));
-            body.push_str("\">");
-            body.push_str(&html::text(repo.name()));
-            body.push_str("</a></td><td>");
-            body.push_str(&html::text(desc_line));
-            body.push_str("</td></tr>");
+            body.push_str(&format!(
+                "<tr><td><a href=\"/repo/{}/summary\">{}</a></td><td>{}</td></tr>",
+                html::attr(&html::url_path(repo.name())),
+                html::text(repo.name()),
+                html::text(&desc)
+            ));
         }
         body.push_str("</table>");
-        response_html(200, "OK", html::page("rsgit", &body))
+        html_response(200, "OK", html::page("rsgit", &body))
     }
 
     fn render_summary(&self, repo: &Repo, req: &Request) -> String {
-        let branches = self.git.output(repo, &["for-each-ref", "--count=8", "--sort=-committerdate", "--format=%(refname:short)%09%(objectname:short)%09%(subject)%09%(authorname)%09%(committerdate:relative)", "refs/heads"]).unwrap_or_default();
-        let commits = self
-            .git
-            .output(
-                repo,
-                &[
-                    "log",
-                    "--decorate=short",
-                    "--date=short",
-                    "--pretty=format:%ad%x09%h%x09%D%x09%s%x09%an",
-                    "-10",
-                ],
-            )
-            .unwrap_or_default();
         let mut body = self.repo_nav(repo, "summary");
-        body.push_str("<section class=\"summary-block\"><table><tr><th>Branch</th><th>Commit message</th><th>Author</th><th>Age</th></tr>");
-        for line in branches.lines() {
-            let cols: Vec<&str> = line.splitn(5, '\t').collect();
-            if cols.len() == 5 {
-                body.push_str(&format!("<tr><td><a href=\"/repo/{}/log?rev={}\">{}</a></td><td>{}</td><td>{}</td><td class=\"muted\">{}</td></tr>", html::attr(&html::url_path(repo.name())), html::attr(&html::url_query(cols[0])), html::text(cols[0]), html::text(cols[2]), html::text(cols[3]), html::text(cols[4])));
-            }
+        body.push_str("<section class=\"summary-block\"><table><tr><th>Branch</th><th>Object</th><th>Backend</th><th>Age</th></tr>");
+        for branch in git::branches(repo).iter().take(8) {
+            let short = branch.name.trim_start_matches("refs/heads/");
+            let short_oid = branch.oid.get(..8).unwrap_or(&branch.oid);
+            body.push_str(&format!("<tr><td>{}</td><td>{}</td><td>manual filesystem reader</td><td class=\"muted\">unknown</td></tr>", html::text(short), html::text(short_oid)));
         }
-        body.push_str("</table></section><section class=\"summary-block\"><table><tr><th>Age</th><th>Commit message</th><th>Author</th></tr>");
-        for line in commits.lines() {
-            let cols: Vec<&str> = line.splitn(5, '\t').collect();
-            if cols.len() == 5 {
-                body.push_str(&format!("<tr><td>{}</td><td><a href=\"/repo/{}/commit?id={}\">{}</a>{}</td><td>{}</td></tr>", html::text(cols[0]), html::attr(&html::url_path(repo.name())), html::attr(&html::url_query(cols[1])), html::text(cols[3]), render_refs(cols[2]), html::text(cols[4])));
-            }
-        }
-        body.push_str(&format!(
-            "</table><p><a href=\"/repo/{}/log\">[...]</a></p></section>",
-            html::attr(&html::url_path(repo.name()))
-        ));
+        body.push_str("</table></section><section class=\"summary-block\"><table><tr><th>Status</th><th>Message</th><th>Owner</th></tr><tr><td>manual</td><td>Commit, tree, blob, search, and diff parsing are disabled until native object decompression is implemented.</td><td>rsgit</td></tr></table></section>");
         body.push_str("<section class=\"summary-block\"><h2>Clone</h2><div class=\"clone-url\">");
         body.push_str(&html::text(&self.public_clone_command(repo, req)));
         body.push_str("</div></section>");
-        response_html(200, "OK", html::page(repo.name(), &body))
+        html_response(200, "OK", html::page(repo.name(), &body))
     }
 
     fn render_log(&self, repo: &Repo) -> String {
-        let out = self
-            .git
-            .output(
-                repo,
-                &[
-                    "log",
-                    "--date=short",
-                    "--pretty=format:%h%x09%ad%x09%an%x09%s",
-                    "-50",
-                ],
-            )
-            .unwrap_or_default();
         let mut body = self.repo_nav(repo, "log");
-        body.push_str("<h1>log</h1><table><tr><th>Commit</th><th>Date</th><th>Author</th><th>Subject</th></tr>");
-        for line in out.lines() {
-            let cols: Vec<&str> = line.splitn(4, '\t').collect();
-            if cols.len() == 4 {
-                body.push_str(&format!("<tr><td><a href=\"/repo/{}/commit?id={}\">{}</a></td><td>{}</td><td>{}</td><td>{}</td></tr>", html::attr(&html::url_path(repo.name())), html::attr(cols[0]), html::text(cols[0]), html::text(cols[1]), html::text(cols[2]), html::text(cols[3])));
-            }
+        body.push_str("<h1>refs</h1><table><tr><th>Object</th><th>Ref</th></tr>");
+        for r in git::refs(repo) {
+            let short = r.oid.get(..8).unwrap_or(&r.oid);
+            body.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td></tr>",
+                html::text(short),
+                html::text(&r.name)
+            ));
         }
         body.push_str("</table>");
-        response_html(
+        html_response(
             200,
             "OK",
-            html::page(&format!("{} log", repo.name()), &body),
-        )
-    }
-
-    fn render_tree(&self, repo: &Repo, req: &Request) -> String {
-        let rev = req.query("rev").unwrap_or("HEAD");
-        let path = req.query("path").unwrap_or("");
-        if !safe_git_path(path) || !safe_git_rev(rev) {
-            return response_html(
-                400,
-                "Bad Request",
-                html::page("bad path", "<h1>bad path</h1>"),
-            );
-        }
-        let spec = if path.is_empty() {
-            rev.to_string()
-        } else {
-            format!("{rev}:{path}")
-        };
-        let out = self
-            .git
-            .output(repo, &["ls-tree", "--end-of-options", &spec])
-            .unwrap_or_default();
-        let mut body = self.repo_nav(repo, "tree");
-        body.push_str("<h1>tree</h1><table><tr><th>Mode</th><th>Type</th><th>Name</th></tr>");
-        for line in out.lines() {
-            if let Some((meta, name)) = line.split_once('\t') {
-                let meta_cols: Vec<&str> = meta.split_whitespace().collect();
-                if meta_cols.len() >= 3 {
-                    let child = if path.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{path}/{name}")
-                    };
-                    let page = if meta_cols[1] == "tree" {
-                        "tree"
-                    } else {
-                        "blob"
-                    };
-                    body.push_str(&format!("<tr><td>{}</td><td>{}</td><td><a href=\"/repo/{}/{}?rev={}&path={}\">{}</a></td></tr>", html::text(meta_cols[0]), html::text(meta_cols[1]), html::attr(&html::url_path(repo.name())), page, html::attr(&html::url_query(rev)), html::attr(&html::url_query(&child)), html::text(name)));
-                }
-            }
-        }
-        body.push_str("</table>");
-        response_html(
-            200,
-            "OK",
-            html::page(&format!("{} tree", repo.name()), &body),
-        )
-    }
-
-    fn render_blob(&self, repo: &Repo, req: &Request) -> String {
-        let rev = req.query("rev").unwrap_or("HEAD");
-        let path = req.query("path").unwrap_or("");
-        if path.is_empty() || !safe_git_path(path) || !safe_git_rev(rev) {
-            return response_html(
-                400,
-                "Bad Request",
-                html::page("bad path", "<h1>bad path</h1>"),
-            );
-        }
-        let spec = format!("{rev}:{path}");
-        match self.git.output(repo, &["show", "--end-of-options", &spec]) {
-            Ok(out) => response_html(
-                200,
-                "OK",
-                html::page(
-                    path,
-                    &format!(
-                        "{}<h1>{}</h1><pre>{}</pre>",
-                        self.repo_nav(repo, "tree"),
-                        html::text(path),
-                        html::text(&out)
-                    ),
-                ),
-            ),
-            Err(_) => response_html(
-                404,
-                "Not Found",
-                html::page("not found", "<h1>blob not found</h1>"),
-            ),
-        }
-    }
-
-    fn render_commit(&self, repo: &Repo, req: &Request) -> String {
-        let id = req.query("id").unwrap_or("HEAD");
-        if !safe_git_rev(id) {
-            return response_html(
-                400,
-                "Bad Request",
-                html::page("bad revision", "<h1>bad revision</h1>"),
-            );
-        }
-        let out = self
-            .git
-            .output(
-                repo,
-                &[
-                    "show",
-                    "--stat",
-                    "--patch",
-                    "--find-renames",
-                    "--end-of-options",
-                    id,
-                ],
-            )
-            .unwrap_or_else(|_| "commit not found".to_string());
-        response_html(200, "OK", html::page(&format!("commit {id}"), &format!("{}<h1>commit {}</h1><p><a href=\"/repo/{}/diff?id={}\">diff only</a></p><pre>{}</pre>", self.repo_nav(repo, "log"), html::text(id), html::attr(&html::url_path(repo.name())), html::attr(&html::url_query(id)), html::text(&out))))
-    }
-
-    fn render_diff(&self, repo: &Repo, req: &Request) -> String {
-        let id = req.query("id").unwrap_or("HEAD");
-        if !safe_git_rev(id) {
-            return response_html(
-                400,
-                "Bad Request",
-                html::page("bad revision", "<h1>bad revision</h1>"),
-            );
-        }
-        let out = self
-            .git
-            .output(
-                repo,
-                &[
-                    "show",
-                    "--format=",
-                    "--patch",
-                    "--find-renames",
-                    "--end-of-options",
-                    id,
-                ],
-            )
-            .unwrap_or_else(|_| "diff not found".to_string());
-        response_html(
-            200,
-            "OK",
-            html::page(
-                &format!("diff {id}"),
-                &format!(
-                    "{}<h1>diff {}</h1><pre>{}</pre>",
-                    self.repo_nav(repo, "log"),
-                    html::text(id),
-                    html::text(&out)
-                ),
-            ),
+            html::page(&format!("{} refs", repo.name()), &body),
         )
     }
 
     fn render_search(&self, repo: &Repo, req: &Request) -> String {
         let q = req.query("q").unwrap_or("").trim();
-        let mut body = self.repo_nav(repo, "search");
-        body.push_str("<h1>search</h1>");
-        if q.is_empty() {
-            body.push_str("<p class=\"muted\">Type a commit-message search above.</p>");
-            return response_html(
-                200,
-                "OK",
-                html::page(&format!("{} search", repo.name()), &body),
-            );
-        }
         if q.len() > MAX_SEARCH_QUERY_LEN || crate::security::has_control_chars(q) {
-            return response_html(
+            return html_response(
                 400,
                 "Bad Request",
                 html::page("bad search", "<h1>bad search query</h1>"),
             );
         }
-        let out = self
-            .git
-            .output(
-                repo,
-                &[
-                    "log",
-                    "--all",
-                    "--fixed-strings",
-                    "--regexp-ignore-case",
-                    "--date=short",
-                    "--pretty=format:%ad%x09%h%x09%s%x09%an",
-                    "--grep",
-                    q,
-                    "-50",
-                ],
-            )
-            .unwrap_or_default();
-        body.push_str("<table><tr><th>Age</th><th>Commit message</th><th>Author</th></tr>");
-        for line in out.lines() {
-            let cols: Vec<&str> = line.splitn(4, '\t').collect();
-            if cols.len() == 4 {
-                body.push_str(&format!("<tr><td>{}</td><td><a href=\"/repo/{}/commit?id={}\">{}</a></td><td>{}</td></tr>", html::text(cols[0]), html::attr(&html::url_path(repo.name())), html::attr(&html::url_query(cols[1])), html::text(cols[2]), html::text(cols[3])));
-            }
-        }
-        body.push_str("</table>");
-        response_html(
-            200,
-            "OK",
-            html::page(&format!("{} search", repo.name()), &body),
+        self.not_implemented(
+            repo,
+            "search",
+            "Commit search is disabled until native commit parsing is implemented.",
+        )
+    }
+
+    fn not_implemented(&self, repo: &Repo, page: &str, message: &str) -> String {
+        html_response(
+            501,
+            "Not Implemented",
+            html::page(
+                page,
+                &format!(
+                    "{}<h1>{}</h1><p class=\"muted\">{}</p>",
+                    self.repo_nav(repo, page),
+                    html::text(page),
+                    html::text(message)
+                ),
+            ),
         )
     }
 
     fn serve_git_head(&self, repo: &Repo) -> Vec<u8> {
-        match fs::read(repo.git_dir().join("HEAD")) {
-            Ok(bytes) => http::response_bytes(200, "OK", "text/plain; charset=utf-8", bytes),
-            Err(_) => http::response_bytes(
-                404,
-                "Not Found",
-                "text/plain; charset=utf-8",
-                b"not found".to_vec(),
-            ),
-        }
+        git::head_bytes(repo)
+            .map(|bytes| http::response_bytes(200, "OK", "text/plain; charset=utf-8", bytes))
+            .unwrap_or_else(|| {
+                http::response_bytes(
+                    404,
+                    "Not Found",
+                    "text/plain; charset=utf-8",
+                    b"not found".to_vec(),
+                )
+            })
     }
 
-    fn serve_info_refs(&self, repo: &Repo, req: &Request) -> Vec<u8> {
-        if req.has_query("service") {
-            // Smart protocol is intentionally not advertised; clients fall back to dumb HTTP.
-        }
-        let refs = self
-            .git
-            .output(
-                repo,
-                &["for-each-ref", "--format=%(objectname)%09%(refname)"],
-            )
-            .unwrap_or_default();
-        http::response_bytes(200, "OK", "text/plain; charset=utf-8", refs.into_bytes())
+    fn serve_info_refs(&self, repo: &Repo) -> Vec<u8> {
+        http::response_bytes(200, "OK", "text/plain; charset=utf-8", git::info_refs(repo))
     }
 
     fn serve_info_packs(&self, repo: &Repo) -> Vec<u8> {
@@ -482,9 +278,7 @@ impl App {
                 .collect();
             packs.sort();
             for pack in packs {
-                body.extend_from_slice(b"P ");
-                body.extend_from_slice(pack.as_bytes());
-                body.push(b'\n');
+                body.extend_from_slice(format!("P {pack}\n").as_bytes());
             }
         }
         http::response_bytes(200, "OK", "text/plain; charset=utf-8", body)
@@ -533,15 +327,16 @@ impl App {
             );
         }
         match fs::read(path) {
-            Ok(bytes) => {
-                let content_type = if clone_path.ends_with(".pack") || clone_path.ends_with(".idx")
-                {
+            Ok(bytes) => http::response_bytes(
+                200,
+                "OK",
+                if clone_path.ends_with(".pack") || clone_path.ends_with(".idx") {
                     "application/octet-stream"
                 } else {
                     "text/plain; charset=utf-8"
-                };
-                http::response_bytes(200, "OK", content_type, bytes)
-            }
+                },
+                bytes,
+            ),
             Err(_) => http::response_bytes(
                 404,
                 "Not Found",
@@ -609,7 +404,7 @@ fn path_parts(path: &str) -> Vec<&str> {
         .collect()
 }
 
-fn response_html(status: u16, reason: &str, body: String) -> String {
+fn html_response(status: u16, reason: &str, body: String) -> String {
     String::from_utf8(http::response(
         status,
         reason,
@@ -617,17 +412,4 @@ fn response_html(status: u16, reason: &str, body: String) -> String {
         &body,
     ))
     .unwrap_or_default()
-}
-
-fn render_refs(raw: &str) -> String {
-    let mut out = String::new();
-    for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let class = if item == "HEAD" { "ref head" } else { "ref" };
-        out.push_str(&format!(
-            " <span class=\"{}\">{}</span>",
-            class,
-            html::text(item)
-        ));
-    }
-    out
 }

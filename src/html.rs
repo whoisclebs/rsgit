@@ -18,11 +18,6 @@ pub fn url_path(input: &str) -> String {
     url_encode(input, false)
 }
 
-/// Percent-encode a query value for URLs.
-pub fn url_query(input: &str) -> String {
-    url_encode(input, true)
-}
-
 fn url_encode(input: &str, encode_slash: bool) -> String {
     let mut out = String::with_capacity(input.len());
     for b in input.bytes() {

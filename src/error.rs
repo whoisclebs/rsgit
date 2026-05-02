@@ -12,10 +12,6 @@ pub enum Error {
     Io(std::io::Error),
     /// Invalid runtime configuration.
     Config(String),
-    /// A Git subprocess failed, timed out, or produced unsafe output.
-    Git(String),
-    /// A spawned helper thread failed to join.
-    Thread(String),
 }
 
 impl Display for Error {
@@ -23,8 +19,6 @@ impl Display for Error {
         match self {
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::Config(msg) => write!(f, "configuration error: {msg}"),
-            Self::Git(msg) => write!(f, "git error: {msg}"),
-            Self::Thread(msg) => write!(f, "thread error: {msg}"),
         }
     }
 }

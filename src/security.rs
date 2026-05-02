@@ -17,7 +17,8 @@ pub fn safe_repo_name(name: &str) -> bool {
 }
 
 /// Validate a path inside a Git tree, not the host filesystem.
-pub fn safe_git_path(path: &str) -> bool {
+#[cfg(test)]
+fn safe_git_path(path: &str) -> bool {
     if path.is_empty() {
         return true;
     }
@@ -33,7 +34,8 @@ pub fn safe_git_path(path: &str) -> bool {
 }
 
 /// Validate a Git revision accepted by the UI.
-pub fn safe_git_rev(rev: &str) -> bool {
+#[cfg(test)]
+fn safe_git_rev(rev: &str) -> bool {
     if rev.is_empty()
         || rev.len() > 128
         || rev.starts_with('-')
