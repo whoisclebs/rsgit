@@ -3,7 +3,7 @@ name = "rsgit"
 version = "0.1.0"
 edition = "2021"
 description = "A tiny Git web browser with a small native Git reader"
-license = "GPL-2.0-only OR MIT"
+license = "MIT"
 
 [dependencies]
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
