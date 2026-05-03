@@ -11,7 +11,9 @@ use crate::git;
 use crate::html;
 use crate::http::{self, Request};
 use crate::repo::{self, Repo};
-use crate::security::{safe_clone_file_path, safe_host, safe_http_clone_url};
+use crate::security::{
+    safe_clone_file_path, safe_git_path, safe_git_rev, safe_host, safe_http_clone_url,
+};
 
 const MAX_REQUEST_BYTES: usize = 8192;
 const MAX_SEARCH_QUERY_LEN: usize = 128;
@@ -131,26 +133,10 @@ impl App {
         match parts.get(2).copied().unwrap_or("summary") {
             "summary" => self.render_summary(&repo, req),
             "log" => self.render_log(&repo),
-            "tree" => self.not_implemented(
-                &repo,
-                "tree",
-                "Native tree parsing requires object decompression support.",
-            ),
-            "blob" => self.not_implemented(
-                &repo,
-                "blob",
-                "Native blob parsing requires object decompression support.",
-            ),
-            "commit" => self.not_implemented(
-                &repo,
-                "commit",
-                "Native commit parsing requires object decompression support.",
-            ),
-            "diff" => self.not_implemented(
-                &repo,
-                "diff",
-                "Native diff parsing requires object decompression support.",
-            ),
+            "tree" => self.render_tree(&repo, req),
+            "blob" => self.render_blob(&repo, req),
+            "commit" => self.render_commit(&repo, req),
+            "diff" => self.render_diff(&repo, req),
             "search" => self.render_search(&repo, req),
             _ => html_response(
                 404,
@@ -186,14 +172,35 @@ impl App {
     }
 
     fn render_summary(&self, repo: &Repo, req: &Request) -> String {
+        let recent = git::recent_commits(repo, 10);
         let mut body = self.repo_nav(repo, "summary");
-        body.push_str("<section class=\"summary-block\"><table><tr><th>Branch</th><th>Object</th><th>Backend</th><th>Age</th></tr>");
+        body.push_str("<section class=\"summary-block\"><table><tr><th>Branch</th><th>Commit message</th><th>Author</th><th>Age</th></tr>");
         for branch in git::branches(repo).iter().take(8) {
             let short = branch.name.trim_start_matches("refs/heads/");
-            let short_oid = branch.oid.get(..8).unwrap_or(&branch.oid);
-            body.push_str(&format!("<tr><td>{}</td><td>{}</td><td>manual filesystem reader</td><td class=\"muted\">unknown</td></tr>", html::text(short), html::text(short_oid)));
+            let commit = recent.iter().find(|c| c.id == branch.oid);
+            let msg = commit.map(|c| c.subject.as_str()).unwrap_or(&branch.oid);
+            let author = commit.map(|c| c.author.as_str()).unwrap_or("");
+            let age = commit.map(|c| c.time.to_string()).unwrap_or_default();
+            body.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td class=\"muted\">{}</td></tr>",
+                html::text(short),
+                html::text(msg),
+                html::text(author),
+                html::text(&age)
+            ));
         }
-        body.push_str("</table></section><section class=\"summary-block\"><table><tr><th>Status</th><th>Message</th><th>Owner</th></tr><tr><td>manual</td><td>Commit, tree, blob, search, and diff parsing are disabled until native object decompression is implemented.</td><td>rsgit</td></tr></table></section>");
+        body.push_str("</table></section><section class=\"summary-block\"><table><tr><th>Age</th><th>Commit message</th><th>Author</th></tr>");
+        for c in &recent {
+            body.push_str(&format!(
+                "<tr><td>{}</td><td><a href=\"/repo/{}/commit?id={}\">{}</a></td><td>{}</td></tr>",
+                html::text(&c.time.to_string()),
+                html::attr(&html::url_path(repo.name())),
+                html::attr(&c.id),
+                html::text(&c.subject),
+                html::text(&c.author)
+            ));
+        }
+        body.push_str("</table></section>");
         body.push_str("<section class=\"summary-block\"><h2>Clone</h2><div class=\"clone-url\">");
         body.push_str(&html::text(&self.public_clone_command(repo, req)));
         body.push_str("</div></section>");
@@ -202,13 +209,11 @@ impl App {
 
     fn render_log(&self, repo: &Repo) -> String {
         let mut body = self.repo_nav(repo, "log");
-        body.push_str("<h1>refs</h1><table><tr><th>Object</th><th>Ref</th></tr>");
-        for r in git::refs(repo) {
-            let short = r.oid.get(..8).unwrap_or(&r.oid);
+        body.push_str("<h1>log</h1><table><tr><th>Commit</th><th>Date</th><th>Author</th><th>Subject</th></tr>");
+        for c in git::recent_commits(repo, 50) {
             body.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td></tr>",
-                html::text(short),
-                html::text(&r.name)
+                "<tr><td><a href=\"/repo/{}/commit?id={}\">{}</a></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html::attr(&html::url_path(repo.name())), html::attr(&c.id), html::text(&c.short_id), html::text(&c.time.to_string()), html::text(&c.author), html::text(&c.subject)
             ));
         }
         body.push_str("</table>");
@@ -228,27 +233,109 @@ impl App {
                 html::page("bad search", "<h1>bad search query</h1>"),
             );
         }
-        self.not_implemented(
-            repo,
-            "search",
-            "Commit search is disabled until native commit parsing is implemented.",
-        )
+        let mut body = self.repo_nav(repo, "search");
+        body.push_str(
+            "<h1>search</h1><table><tr><th>Commit</th><th>Subject</th><th>Author</th></tr>",
+        );
+        for c in git::search_commits(repo, q, 50) {
+            body.push_str(&format!(
+                "<tr><td><a href=\"/repo/{}/commit?id={}\">{}</a></td><td>{}</td><td>{}</td></tr>",
+                html::attr(&html::url_path(repo.name())),
+                html::attr(&c.id),
+                html::text(&c.short_id),
+                html::text(&c.subject),
+                html::text(&c.author)
+            ));
+        }
+        body.push_str("</table>");
+        html_response(200, "OK", html::page("search", &body))
     }
 
-    fn not_implemented(&self, repo: &Repo, page: &str, message: &str) -> String {
-        html_response(
-            501,
-            "Not Implemented",
-            html::page(
-                page,
-                &format!(
-                    "{}<h1>{}</h1><p class=\"muted\">{}</p>",
-                    self.repo_nav(repo, page),
-                    html::text(page),
-                    html::text(message)
+    fn render_tree(&self, repo: &Repo, req: &Request) -> String {
+        let rev = req.query("rev").unwrap_or("HEAD");
+        let path = req.query("path").unwrap_or("");
+        if !safe_git_rev(rev) || !safe_git_path(path) {
+            return html_response(
+                400,
+                "Bad Request",
+                html::page("bad path", "<h1>bad path</h1>"),
+            );
+        }
+        let mut body = self.repo_nav(repo, "tree");
+        body.push_str(
+            "<h1>tree</h1><table><tr><th>Mode</th><th>Type</th><th>Object</th><th>Name</th></tr>",
+        );
+        for e in git::tree_entries(repo, rev, path) {
+            let child = if path.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{path}/{}", e.name)
+            };
+            let page = if e.kind == "tree" { "tree" } else { "blob" };
+            let short_oid = e.oid.get(..8).unwrap_or(&e.oid);
+            body.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td><a href=\"/repo/{}/{}?rev={}&path={}\">{}</a></td></tr>", html::text(&e.mode), html::text(&e.kind), html::text(short_oid), html::attr(&html::url_path(repo.name())), page, html::attr(rev), html::attr(&html::url_path(&child)), html::text(&e.name)));
+        }
+        body.push_str("</table>");
+        html_response(200, "OK", html::page("tree", &body))
+    }
+
+    fn render_blob(&self, repo: &Repo, req: &Request) -> String {
+        let rev = req.query("rev").unwrap_or("HEAD");
+        let path = req.query("path").unwrap_or("");
+        if path.is_empty() || !safe_git_rev(rev) || !safe_git_path(path) {
+            return html_response(
+                400,
+                "Bad Request",
+                html::page("bad blob", "<h1>bad blob</h1>"),
+            );
+        }
+        match git::blob(repo, rev, path, 1024 * 1024) {
+            Some(bytes) => html_response(
+                200,
+                "OK",
+                html::page(
+                    path,
+                    &format!(
+                        "{}<h1>{}</h1><pre>{}</pre>",
+                        self.repo_nav(repo, "tree"),
+                        html::text(path),
+                        html::text(&String::from_utf8_lossy(&bytes))
+                    ),
                 ),
             ),
-        )
+            None => html_response(
+                404,
+                "Not Found",
+                html::page("blob not found", "<h1>blob not found or too large</h1>"),
+            ),
+        }
+    }
+
+    fn render_commit(&self, repo: &Repo, req: &Request) -> String {
+        let id = req.query("id").unwrap_or("HEAD");
+        if !safe_git_rev(id) {
+            return html_response(
+                400,
+                "Bad Request",
+                html::page("bad revision", "<h1>bad revision</h1>"),
+            );
+        }
+        match git::commit(repo, id) {
+            Some(c) => html_response(200, "OK", html::page(&format!("commit {}", c.short_id), &format!("{}<h1>commit {}</h1><p><strong>Author:</strong> {}</p><p><strong>Time:</strong> {}</p><p><strong>Parents:</strong> {}</p><pre>{}</pre>", self.repo_nav(repo, "log"), html::text(&c.id), html::text(&c.author), html::text(&c.time.to_string()), html::text(&c.parents.join(" ")), html::text(&c.subject)))),
+            None => html_response(404, "Not Found", html::page("commit not found", "<h1>commit not found</h1>")),
+        }
+    }
+
+    fn render_diff(&self, repo: &Repo, req: &Request) -> String {
+        let id = req.query("id").unwrap_or("HEAD");
+        if !safe_git_rev(id) {
+            return html_response(
+                400,
+                "Bad Request",
+                html::page("bad revision", "<h1>bad revision</h1>"),
+            );
+        }
+        html_response(200, "OK", html::page("diff", &format!("{}<h1>diff {}</h1><p class=\"muted\">Native textual diff is queued next; commit/tree/blob reading is active.</p>", self.repo_nav(repo, "log"), html::text(id))))
     }
 
     fn serve_git_head(&self, repo: &Repo) -> Vec<u8> {

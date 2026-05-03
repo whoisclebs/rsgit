@@ -1,6 +1,6 @@
 # rsgit
 
-`rsgit` is a tiny Git web browser written in Rust with **zero third-party Rust crates**.
+`rsgit` is a tiny Git web browser written in Rust with a small native Git reader. It does not execute the `git` command.
 
 It is intentionally much smaller than cgit. The first goal is a lightweight MVP that can browse local Git repositories using Rust's standard library plus the `git` CLI at runtime.
 
@@ -18,7 +18,7 @@ It is intentionally much smaller than cgit. The first goal is a lightweight MVP 
 - Dark, cgit-inspired summary page with branch, recent commit, and clone sections
 - Basic dumb HTTP Git clone support through `git clone http://host/repo/name`
 - Built-in minimal HTTP server
-- No Cargo dependencies
+- No `git` subprocess execution
 
 ## Non-goals for now
 
@@ -101,7 +101,7 @@ The displayed command becomes:
 git clone https://git.example.com/repo/myrepo
 ```
 
-Clone support is intentionally minimal and dependency-free. It serves the dumb HTTP Git endpoints (`HEAD`, `info/refs`, `objects/info/packs`, and object/pack files) directly from the repository. For best compatibility with packed repositories, keep pack files below the configured safety limit.
+Clone support is intentionally minimal. It serves the dumb HTTP Git endpoints (`HEAD`, `info/refs`, `objects/info/packs`, and object/pack files) directly from the repository. For best compatibility with packed repositories, keep pack files below the configured safety limit.
 
 ## Docker
 
@@ -146,6 +146,6 @@ Do not mount `/`, `$HOME`, Docker sockets, or private repository trees unless ac
 ## Design notes
 
 - Uses `std::net::TcpListener` instead of a web framework.
-- Uses `std::process::Command` to call `git` instead of depending on `git2`/libgit2.
+- Uses a small custom Git object reader for the subset rsgit needs.
 - Keeps HTML/CSS inline and minimal.
 - Keeps routing simple and explicit.

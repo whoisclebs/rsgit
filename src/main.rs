@@ -3,20 +3,11 @@
 //! This file intentionally only handles bootstrap concerns: configuration,
 //! listener creation, and handing accepted sockets to the application layer.
 
-mod app;
-mod config;
-mod error;
-mod git;
-mod html;
-mod http;
-mod repo;
-mod security;
-
 use std::net::TcpListener;
 
-use app::App;
-use config::Config;
-use error::Result;
+use rsgit::app::App;
+use rsgit::config::Config;
+use rsgit::error::Result;
 
 fn main() -> Result<()> {
     let config = Config::from_env()?;
